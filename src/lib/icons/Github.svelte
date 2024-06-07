@@ -11,7 +11,7 @@
 	/>
 </svg>
 
-<style>
+<style> 
 	svg {
 		fill: var(--fill);
 	}
