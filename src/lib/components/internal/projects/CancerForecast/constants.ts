@@ -16,5 +16,6 @@ export interface Distribution {
 
 export type PreventionDeterminant = 'date' | 'panic';
 
+export type Variant = 'standard' | 'noisePlusSlope';
 export type Mode = 'summed' | 'separate' | 'both';
 export type Audience = 'science' | 'general';

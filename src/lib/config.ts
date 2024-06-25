@@ -4,7 +4,7 @@ import type { SiteConfig } from './types/config';
 
 // Main config for entire website
 export const siteConfig: SiteConfig = {
-	title: 'Peer to Public',
+	title: 'Peer to Public Sandbox',
 	description: 'Simple, visual explanations about SARS-CoV-2',
 	url: 'https://www.peertopublic.com/',
 	link: 'https://github.com/gckirchoff/peer-to-public',

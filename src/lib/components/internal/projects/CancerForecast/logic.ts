@@ -1,3 +1,5 @@
+import { randomInt } from 'd3';
+
 import type { Distribution, PredictedCases } from './constants';
 
 export const getExtraCases = (hazardRatio: number, baseline: number): number =>
@@ -134,7 +136,8 @@ interface GetDistributionsArgs {
 	beginningOfPandemic: Date;
 	dateOfPrevention: Date;
 	finalDateToMeasureTo: Date;
-	extraCases: number;
+	baselineCancer: number;
+	hazardRatio: number;
 	delay: number;
 	stdDeviation: number;
 }
@@ -143,10 +146,12 @@ export const getDistributions = ({
 	beginningOfPandemic,
 	dateOfPrevention,
 	finalDateToMeasureTo,
-	extraCases,
+	baselineCancer,
+	hazardRatio,
 	delay,
 	stdDeviation,
 }: GetDistributionsArgs): Distribution[] => {
+	const extraCases = getExtraCases(hazardRatio, baselineCancer);
 	const yearsDifference = dateOfPrevention.getFullYear() - beginningOfPandemic.getFullYear();
 	const newDistributions: Distribution[] = [];
 	for (let i = 0; i <= yearsDifference; i++) {
@@ -203,4 +208,72 @@ export const createSummedDistribution = ({
 		newSummedDistributions.push({ date: currentDate, cases: totalCases });
 	}
 	return newSummedDistributions;
+};
+
+interface CreateBaselineCasesArgs {
+	start: Date;
+	end: Date;
+	baselineCancerSlope: number;
+	baselineCancer: number;
+}
+
+export const createBaselineCases = ({
+	start,
+	end,
+	baselineCancerSlope,
+	baselineCancer,
+}: CreateBaselineCasesArgs) => {
+	const years = end.getFullYear() - start.getFullYear();
+	const percentModifier = 1 + baselineCancerSlope;
+
+	const baselineCancerCases: PredictedCases[] = [];
+	for (let i = 0; i < years; i++) {
+		const date = new Date(start.getFullYear() + i, 11, 31);
+		const prevLevel = baselineCancerCases[i - 1]?.cases ?? baselineCancer;
+		const nextLevel = prevLevel * percentModifier;
+
+		baselineCancerCases.push({
+			date,
+			cases: nextLevel,
+		});
+	}
+	return baselineCancerCases;
+};
+
+export const createNoiseValues = (
+	baselineCancerCases: PredictedCases[],
+	baselineNoise: number,
+): number[] => {
+	return baselineCancerCases.map((baselinePoint) => {
+		const randNoiseNum = randomInt(baselinePoint.cases * baselineNoise);
+		const sign = Math.random() > 0.5 ? 1 : -1;
+		return randNoiseNum() * sign;
+	});
+};
+
+export const noisifyBaseline = (
+	baselineCancerCases: PredictedCases[],
+	noiseValues: number[],
+): PredictedCases[] => {
+	return baselineCancerCases.map((baselinePoint, i) => {
+		const noiseValue = noiseValues[i] ?? 0;
+		return {
+			...baselinePoint,
+			cases: baselinePoint.cases + noiseValue,
+		};
+	});
+};
+
+export const integrateBaselineCases = (
+	casesToRender: PredictedCases[],
+	baselineCancerCases: PredictedCases[],
+	baselineCancer: number,
+) => {
+	return casesToRender.map((point, i) => {
+		const overallCancerLevel = baselineCancerCases[i]?.cases ?? baselineCancer;
+		return {
+			...point,
+			cases: point.cases + overallCancerLevel - baselineCancer,
+		};
+	});
 };

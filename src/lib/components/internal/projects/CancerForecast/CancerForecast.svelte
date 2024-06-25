@@ -1,43 +1,45 @@
 <script lang="ts">
-	import { extent, scaleLinear, scaleTime, line, max, curveNatural, format } from 'd3';
+	import { scaleLinear, scaleTime, line, max, format } from 'd3';
 
-	import { Body1, Body2 } from '../../typography';
+	import { Body2 } from '../../typography';
 	import AxisX from './AxisX/AxisX.svelte';
 	import AxisY from './AxisY/AxisY.svelte';
 	import Line from './Line/Line.svelte';
-	import Gradient from './Gradient/Gradient.svelte';
 	import type {
 		Distribution,
 		PredictedCases,
 		Mode,
 		PreventionDeterminant,
 		Audience,
+		Variant,
 	} from './constants';
 	import { beginningOfPandemic, endOfChart } from './constants';
 	import {
-		getExtraCases,
 		addYearsToDate,
-		timeBetween,
-		getCasesOnDate,
-		getCasesUpToDate,
 		getCumulativeCasesUpToDate,
-		createPredictedCases,
 		getDistributions,
 		createSummedDistribution,
+		integrateBaselineCases,
+		createBaselineCases,
+		createNoiseValues,
+		noisifyBaseline,
 	} from './logic';
+	import { roundTo } from '../util/math';
 
 	export let audience: Audience = 'general';
+	export let variant: Variant = 'standard';
 
 	const numberFormatter = (num: number): string => format('.2s')(num).replace('G', 'B');
-	const extraCasesGradientId = 'extra-cases-gradient';
-	const gradientColors = ['#72ade8', 'rgb(236, 232, 253)'];
 
-	let preventionDeterminant: PreventionDeterminant = 'panic';
+	let preventionDeterminant: PreventionDeterminant = variant === 'standard' ? 'panic' : 'date';
 	let yearsFromNowToStartPrevention = 5;
 	let hazardRatio = 1.5;
 	let delay = 20;
 	let baselineCancer = 18000000;
+	let baselineCancerSlope = 0;
+	let baselineNoise = 0;
 	let mode: Mode = 'summed';
+	let realLifeMode = false;
 
 	let panicThreshold = 0.05;
 	let panicPredictionPoint: PredictedCases | null = null;
@@ -62,14 +64,13 @@
 	$: casesYetToCome = totalExtraCases - casesThatHaveOccuredSoFar;
 
 	$: {
-		const extraCancer = getExtraCases(hazardRatio, baselineCancer);
-
 		if (preventionDeterminant === 'date') {
 			const newDistributions = getDistributions({
 				beginningOfPandemic,
 				dateOfPrevention,
 				finalDateToMeasureTo,
-				extraCases: extraCancer,
+				baselineCancer,
+				hazardRatio,
 				delay,
 				stdDeviation: standardDeviation,
 			});
@@ -88,7 +89,8 @@
 				beginningOfPandemic,
 				dateOfPrevention: fullScopeDate,
 				finalDateToMeasureTo: fullScopeDate,
-				extraCases: extraCancer,
+				baselineCancer,
+				hazardRatio,
 				delay,
 				stdDeviation: standardDeviation,
 			});
@@ -120,7 +122,8 @@
 					beginningOfPandemic,
 					dateOfPrevention: pointOfPanic.date,
 					finalDateToMeasureTo: panicDateToMeasureTo,
-					extraCases: extraCancer,
+					baselineCancer,
+					hazardRatio,
 					delay,
 					stdDeviation: standardDeviation,
 				});
@@ -166,28 +169,6 @@
 		.range([0, innerChartWidth])
 		.nice();
 
-	// $: domain = (
-	// 	internalMode === 'separate'
-	// 		? [0, max(distributions[0].predictedCases, yAccessor)]
-	// 		: [0, max(summedDistributions, yAccessor)]
-	// ) as [number, number];
-
-	$: yDomain = (
-		internalMode === 'separate'
-			? [0, max(distributions[0].predictedCases, yAccessor)]
-			: [0, Math.max(baselineCancer * 3, max(summedDistributions, yAccessor) as number)]
-	) as [number, number];
-
-	$: yScale = scaleLinear().domain(yDomain).range([innerChartHeight, 0]).nice();
-
-	$: xAccessorScaled = (d: PredictedCases) => xScale(xAccessor(d));
-	$: yAccessorScaled = (d: PredictedCases) => yScale(yAccessor(d));
-	$: y0AccessorScaled = yScale(yScale.domain()[0]);
-
-	$: lineGenerator = line<PredictedCases>()
-		.x((d) => xScale(xAccessor(d)))
-		.y((d) => yScale(yAccessor(d)));
-
 	$: indexOfLastPointToRender = summedDistributions.findIndex(
 		({ date }) => date >= xScale.domain()[1],
 	);
@@ -203,6 +184,48 @@
 			}
 			return panicPredictionPoint.date.getFullYear() <= date.getFullYear();
 		}) + 1;
+
+	$: baseline = createBaselineCases({
+		start: beginningOfPandemic,
+		end: endOfChart,
+		baselineCancerSlope,
+		baselineCancer,
+	});
+	$: noiseValues = createNoiseValues(baseline, baselineNoise);
+	$: baselineCancerCases = noisifyBaseline(baseline, noiseValues);
+
+	$: cutoffAtEndOfChart = ({ date }: PredictedCases) =>
+		date.getFullYear() < endOfChart.getFullYear();
+
+	$: plottedExtraCases = integrateBaselineCases(
+		renderedSummedCases,
+		baselineCancerCases,
+		baselineCancer,
+	).filter(cutoffAtEndOfChart);
+	$: plottedExtraCasesSoFarArea = integrateBaselineCases(
+		renderedSummedCases.slice(0, indexOfCancerSoFarEnd),
+		baselineCancerCases,
+		baselineCancer,
+	);
+
+	$: lastCancerCasesLevel = baselineCancerCases[Math.floor(baselineCancerCases.length / 3)];
+	$: baselineLevelForYDomain = lastCancerCasesLevel ? lastCancerCasesLevel.cases : baselineCancer;
+	$: baselineDerivedYDomainMax = baselineLevelForYDomain * 3;
+
+	$: yDomain = (
+		internalMode === 'separate'
+			? [0, max(distributions[0].predictedCases, yAccessor)]
+			: [0, Math.max(baselineDerivedYDomainMax, max(plottedExtraCases, yAccessor) as number)]
+	) as [number, number];
+
+	$: yScale = scaleLinear().domain(yDomain).range([innerChartHeight, 0]).nice();
+
+	$: xAccessorScaled = (d: PredictedCases) => xScale(xAccessor(d));
+	$: yAccessorScaled = (d: PredictedCases) => yScale(yAccessor(d));
+
+	$: lineGenerator = line<PredictedCases>()
+		.x((d) => xScale(xAccessor(d)))
+		.y((d) => yScale(yAccessor(d)));
 
 	let preventionStartInfoBox: SVGGElement | null = null;
 	let preventionStartInfoBoxXPosition = 0;
@@ -232,10 +255,17 @@
 
 <div class="widget-container">
 	<div class="distributions-toggle">
-		<label on:change={handleShowDistributions}>
-			Show Latency Distributions
-			<input type="checkbox" />
-		</label>
+		{#if variant === 'standard'}
+			<label on:change={handleShowDistributions}>
+				Show Latency Distributions
+				<input type="checkbox" />
+			</label>
+		{:else}
+			<label>
+				Real Life View
+				<input type="checkbox" bind:checked={realLifeMode} />
+			</label>
+		{/if}
 	</div>
 	<div class="inputs-container">
 		<label class="range-input">
@@ -243,14 +273,19 @@
 				{#if preventionDeterminant === 'date'}
 					<Body2>
 						{dateOfPrevention.toLocaleDateString()}
+						{#if variant === 'noisePlusSlope'}
+							prevention
+						{/if}
 					</Body2>
 				{:else}
 					<Body2>{Math.round(panicThreshold * 100)}%</Body2>
 				{/if}
-				<select bind:value={preventionDeterminant}>
-					<option value="panic">extra cases panic threshold</option>
-					<option value="date">date of prevention</option>
-				</select>
+				{#if variant === 'standard'}
+					<select bind:value={preventionDeterminant}>
+						<option value="panic">extra cases panic threshold</option>
+						<option value="date">date of prevention</option>
+					</select>
+				{/if}
 			</div>
 			{#if preventionDeterminant === 'date'}
 				<input bind:value={yearsFromNowToStartPrevention} type="range" min={0} max={30} step={1} />
@@ -270,49 +305,40 @@
 			</Body2>
 			<input bind:value={delay} type="range" min={1} max={30} step={1} />
 		</label>
-		<label class="range-input">
-			<Body2>
-				{numberFormatter(baselineCancer)} baseline incidence:
-			</Body2>
-			<input
-				bind:value={baselineCancer}
-				type="range"
-				min={1000000}
-				max={100000000}
-				step={1000000}
-			/>
-		</label>
+		{#if variant === 'standard'}
+			<label class="range-input">
+				<Body2>
+					{numberFormatter(baselineCancer)} baseline incidence:
+				</Body2>
+				<input
+					bind:value={baselineCancer}
+					type="range"
+					min={1000000}
+					max={100000000}
+					step={1000000}
+				/>
+			</label>
+		{/if}
+		{#if variant === 'noisePlusSlope'}
+			<label class="range-input">
+				<Body2>
+					{roundTo(baselineCancerSlope * 100, 2)}% baseline increase:
+				</Body2>
+				<input bind:value={baselineCancerSlope} type="range" min={0} max={0.02} step={0.0005} />
+			</label>
+			<label class="range-input">
+				<Body2>
+					{Math.round(baselineNoise * 100)}% baseline noise:
+				</Body2>
+				<input bind:value={baselineNoise} type="range" min={0} max={0.5} step={0.05} />
+			</label>
+		{/if}
 	</div>
 	<div class="chart-container" bind:clientWidth={width}>
 		<svg {width} {height}>
 			<g style:transform="translate({margin.left}px, {margin.top}px)">
-				<defs>
-					<Gradient id={extraCasesGradientId} colors={gradientColors} x2="0" y2="100%" />
-				</defs>
 				<AxisX {xScale} width={innerChartWidth} height={innerChartHeight} />
 				<AxisY {yScale} />
-				<rect
-					x={0}
-					y={yScale(baselineCancer)}
-					width={innerChartWidth}
-					height={innerChartHeight - yScale(baselineCancer)}
-					fill="#E2DFA5"
-				/>
-				<text
-					x={innerChartWidth - 10}
-					y={yScale(baselineCancer) + 20}
-					text-anchor="end"
-					class="baseline-text yellow"
-				>
-					Baseline Incidence
-				</text>
-				<line
-					x2={innerChartWidth}
-					y1={yScale(baselineCancer)}
-					y2={yScale(baselineCancer)}
-					stroke="#FFA500"
-					stroke-width={1}
-				/>
 				{#if internalMode === 'summed' || internalMode === 'both'}
 					<!-- <path
 					d={lineGenerator(summedDistributions)}
@@ -322,28 +348,30 @@
 				/> -->
 					<Line
 						type="area"
-						data={renderedSummedCases}
+						data={plottedExtraCases}
 						{xAccessorScaled}
 						{yAccessorScaled}
-						y0AccessorScaled={yScale(baselineCancer)}
-						style="fill: url(#{extraCasesGradientId}); transition: none; filter: brightness({hoveredExtraCasesToCome
+						y0AccessorScaled={yScale(0)}
+						style="fill: #7DB2E9; transition: none; filter: brightness({hoveredExtraCasesToCome
 							? 1.08
 							: 1});"
 						on:mouseover={() => (hoveredExtraCasesToCome = true)}
 						on:mouseleave={() => (hoveredExtraCasesToCome = false)}
 					/>
+					{#if !realLifeMode}
+						<Line
+							type="area"
+							data={plottedExtraCasesSoFarArea}
+							{xAccessorScaled}
+							{yAccessorScaled}
+							y0AccessorScaled={yScale(0)}
+							style="fill: {hoveredExtraCasesSoFar ? '#ffabab' : '#ff7a7a'}; transition: none;"
+							on:mouseover={() => (hoveredExtraCasesSoFar = true)}
+							on:mouseleave={() => (hoveredExtraCasesSoFar = false)}
+						/>
+					{/if}
 					<Line
-						type="area"
-						data={renderedSummedCases.slice(0, indexOfCancerSoFarEnd)}
-						{xAccessorScaled}
-						{yAccessorScaled}
-						y0AccessorScaled={yScale(baselineCancer)}
-						style="fill: {hoveredExtraCasesSoFar ? '#ffabab' : '#ff7a7a'}; transition: none;"
-						on:mouseover={() => (hoveredExtraCasesSoFar = true)}
-						on:mouseleave={() => (hoveredExtraCasesSoFar = false)}
-					/>
-					<Line
-						data={renderedSummedCases}
+						data={plottedExtraCases}
 						{xAccessorScaled}
 						{yAccessorScaled}
 						style="stroke: #67a4e0; transition: none;"
@@ -352,7 +380,13 @@
 				{#if internalMode === 'separate' || internalMode === 'both'}
 					{#each distributions as distribution}
 						<path
-							d={lineGenerator(distribution.predictedCases)}
+							d={lineGenerator(
+								integrateBaselineCases(
+									distribution.predictedCases,
+									baselineCancerCases,
+									baselineCancer,
+								).filter(cutoffAtEndOfChart),
+							)}
 							stroke-width="2"
 							fill="transparent"
 							stroke="#005CC8"
@@ -367,12 +401,41 @@
 						{/each} -->
 					{/each}
 				{/if}
+				<Line
+					type="area"
+					data={baselineCancerCases}
+					{xAccessorScaled}
+					yAccessorScaled={(d) => yScale(d.cases)}
+					y0AccessorScaled={innerChartHeight}
+					style="fill: {realLifeMode ? '#7DB2E9' : '#E2DFA5'};"
+					on:mouseover={() => (hoveredExtraCasesToCome = true)}
+					on:mouseleave={() => (hoveredExtraCasesToCome = false)}
+				/>
+				{#if !realLifeMode}
+					<Line
+						data={baselineCancerCases}
+						{xAccessorScaled}
+						yAccessorScaled={(d) => yScale(d.cases)}
+						y0AccessorScaled={innerChartHeight}
+						style="stroke: #FF8C00;"
+						on:mouseover={() => (hoveredExtraCasesToCome = true)}
+						on:mouseleave={() => (hoveredExtraCasesToCome = false)}
+					/>
+					<text
+						x={innerChartWidth - 10}
+						y={yScale(baselineCancer) + 20}
+						text-anchor="end"
+						class="baseline-text yellow"
+					>
+						Baseline Incidence
+					</text>
+				{/if}
 				{#if preventionDeterminant === 'date'}
 					<line
 						x1={xScale(dateOfPrevention)}
 						y1={15}
 						x2={xScale(dateOfPrevention)}
-						y2={yScale(baselineCancer)}
+						y2={yScale(0)}
 						stroke-width={2}
 						stroke="red"
 					/>
@@ -402,7 +465,7 @@
 							x1={xScale(panicPredictionPoint.date)}
 							y1={Math.min(panicThresholdYPosition, 125)}
 							x2={xScale(panicPredictionPoint.date)}
-							y2={yScale(baselineCancer)}
+							y2={yScale(0)}
 							stroke-width={2}
 							stroke="grey"
 						/>
@@ -499,7 +562,9 @@
 
 		.distributions-toggle {
 			display: flex;
+			flex-wrap: wrap;
 			justify-content: flex-end;
+			gap: var(--spacing-16);
 			margin-bottom: var(--spacing-32);
 
 			label {
@@ -510,8 +575,9 @@
 
 		.inputs-container {
 			display: grid;
-			grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+			grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
 			row-gap: var(--spacing-8);
+			column-gap: var(--spacing-16);
 			margin-top: var(--spacing-8);
 			margin-bottom: var(--spacing-32);
 
